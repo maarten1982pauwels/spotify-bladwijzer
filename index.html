@@ -210,7 +210,7 @@ async function accessToken() {
   catch { store.del('token'); return null; }
   return store.get('token').access;
 }
-function logout() { store.del('token'); render(); }
+function logout() { store.del('token'); me = null; playlists = null; render(); }
 
 // ===== Spotify API =====
 async function api(path, options = {}) {
@@ -437,11 +437,25 @@ function renderSettings() {
     <h2>Synchronisatie tussen Mac en iPhone</h2>
     <div id="sync" class="card"></div>
     <h2>Spotify</h2>
-    <div class="card"><div class="muted">Je bent ingelogd met Spotify.</div>
+    <div class="card"><div class="row" id="account"><div class="grow muted">Account laden…</div></div>
       <div class="actions"><button class="small" id="logout">Uitloggen</button></div></div>`;
   document.getElementById('back').onclick = () => location.hash = '';
   document.getElementById('logout').onclick = () => { location.hash = ''; logout(); };
   updateSyncStatus();
+  renderAccount();
+}
+
+async function renderAccount() {
+  const el = document.getElementById('account');
+  try {
+    me = me || await api('/me');
+    const pic = me.images?.at(-1)?.url || me.images?.[0]?.url || '';
+    const name = me.display_name || me.id;
+    el.innerHTML = `${pic ? `<img class="cover" style="border-radius:50%" src="${esc(pic)}" alt="">`
+        : `<div class="cover row" style="border-radius:50%;justify-content:center;font-size:22px;font-weight:600">${esc(name.charAt(0).toUpperCase())}</div>`}
+      <div class="grow"><div class="muted">Ingelogd als</div><div class="ellipsis"><b>${esc(name)}</b></div>
+        <div class="muted ellipsis">Gebruikersnaam: ${esc(me.id)}</div></div>`;
+  } catch (e) { el.innerHTML = `<div class="grow muted">Kon je account niet ophalen: ${esc(e.message)}</div>`; }
 }
 
 function updateSyncStatus() {
