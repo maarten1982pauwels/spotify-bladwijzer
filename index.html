@@ -70,7 +70,7 @@ const API = 'https://api.spotify.com/v1';
 
 // ===== Opslag (later uit te breiden met synchronisatie) =====
 // Bladwijzers en sync-gegevens worden per Spotify-account bewaard, zodat meerdere mensen hetzelfde toestel kunnen gebruiken.
-const PER_USER = ['bladwijzers', 'gh_token', 'gist_id', 'gist_etag', 'gist_last', 'last_sync', 'sync_error'];
+const PER_USER = ['bladwijzers', 'pl_dates', 'gh_token', 'gist_id', 'gist_etag', 'gist_last', 'last_sync', 'sync_error'];
 const raw = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
   set(key, v) { try { localStorage.setItem(key, v); } catch {} },
@@ -297,6 +297,40 @@ async function loadTracks(playlistId) {
   const rows = await allPages(`/playlists/${playlistId}/items?limit=50`);
   return rows.map(r => r.item || r.track).filter(t => t && t.uri);
 }
+// Spotify bewaart geen aanmaakdatum van playlists. Voor eigen playlists gebruiken we de datum van het
+// eerst toegevoegde nummer; dat resultaat wordt bewaard en enkel opnieuw berekend als de playlist wijzigt.
+function playlistDate(p) {
+  const d = store.get('pl_dates', {})[p.id];
+  return d && d.snap === p.snapshot_id ? d.date : undefined;
+}
+let datesRunning = false;
+async function loadPlaylistDates(lists, onUpdate) {
+  if (datesRunning) return;
+  datesRunning = true;
+  try {
+    const todo = lists.filter(p => canListTracks(p) && playlistDate(p) === undefined);
+    const worker = async () => {
+      while (todo.length) {
+        const p = todo.shift();
+        let first = null, url = `/playlists/${p.id}/items?limit=100&fields=next,items(added_at)`;
+        try {
+          while (url) {
+            const page = await api(url);
+            for (const r of page.items || []) if (r.added_at && r.added_at > '1971' && (!first || r.added_at < first)) first = r.added_at;
+            url = page.next;
+          }
+        } catch { continue; }
+        const all = store.get('pl_dates', {});
+        all[p.id] = { snap: p.snapshot_id, date: first };
+        store.set('pl_dates', all);
+        onUpdate?.();
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+  } finally { datesRunning = false; }
+}
+function fmtDay(iso) { return new Date(iso).toLocaleDateString('nl-BE', { day: 'numeric', month: 'short', year: 'numeric' }); }
+
 function simplify(track, position) {
   return {
     uri: track.uri, name: track.name,
@@ -404,13 +438,15 @@ async function renderHome() {
         <div class="card row" data-id="${p.id}">
           <img class="cover" src="${esc(p.images?.at(-1)?.url || p.images?.[0]?.url || '')}" alt="">
           <div class="grow"><div class="ellipsis"><b>${esc(p.name)}</b></div>
-            <div class="ellipsis">${bookmarkLine(all[p.id])}</div></div>
+            <div class="ellipsis">${bookmarkLine(all[p.id])}</div>
+            ${playlistDate(p) ? `<div class="muted ellipsis">Aangemaakt ${fmtDay(playlistDate(p))}</div>` : ''}</div>
         </div>`).join('') || '<p class="muted">Geen playlists gevonden.</p>';
       document.querySelectorAll('#lists .card').forEach(el => el.onclick = () => location.hash = 'playlist/' + el.dataset.id);
     };
     document.getElementById('filter').oninput = draw;
     draw();
     viewRefresh = draw;
+    let t; loadPlaylistDates(lists, () => { clearTimeout(t); t = setTimeout(() => { if (viewRefresh === draw) draw(); }, 300); });
   } catch (e) { document.getElementById('lists').innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
 }
 
@@ -448,7 +484,7 @@ async function renderPlaylist(id) {
   const b = bookmarks.get(id);
   app.innerHTML = `<header><button class="link" id="back">‹ Terug</button></header>
     <div class="row"><img class="cover big" src="${esc(p.images?.[0]?.url || '')}" alt="">
-      <div class="grow"><h1>${esc(p.name)}</h1><div class="muted">${trackCount(p)} nummers</div></div></div>
+      <div class="grow"><h1>${esc(p.name)}</h1><div class="muted">${trackCount(p)} nummers${playlistDate(p) ? ' · aangemaakt ' + fmtDay(playlistDate(p)) : ''}</div></div></div>
     <div class="card" style="margin-top:16px" id="bm"></div>
     <h2>Kies het laatste nummer zelf</h2>
     <input type="search" id="q" placeholder="${canListTracks(p) ? 'Filter de nummers' : 'Zoek een nummer op titel of artiest'}">
