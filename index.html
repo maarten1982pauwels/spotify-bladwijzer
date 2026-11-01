@@ -341,25 +341,46 @@ function simplify(track, position) {
 }
 
 // ===== Hervatten =====
+// Sommige toestellen laten zich niet op afstand bedienen ("restricted"). Daarom kiezen we zelf een toestel
+// dat wél bediend kan worden, en als dat er niet is, bieden we aan om de playlist in Spotify te openen.
 async function resume(playlist) {
   const b = bookmarks.get(playlist.id);
-  const body = { context_uri: playlist.uri };
-  if (b) body.offset = { uri: b.uri };
-  try {
-    await api('/me/player/play', { method: 'PUT', body: JSON.stringify(body) });
-    toast(b ? `Speelt verder vanaf „${b.name}”` : 'Playlist gestart');
-  } catch (e) {
-    if (e.status === 404) {
-      // Geen actief toestel: probeer het eerste beschikbare toestel.
-      const { devices } = await api('/me/player/devices');
-      if (devices?.length) {
-        await api('/me/player/play?device_id=' + devices[0].id, { method: 'PUT', body: JSON.stringify(body) });
-        toast(`Speelt verder op ${devices[0].name}`);
-      } else {
-        toast('Open eerst Spotify op je Mac of iPhone en probeer opnieuw.');
-      }
-    } else toast('Hervatten mislukt: ' + e.message);
+  const body = JSON.stringify(b ? { context_uri: playlist.uri, offset: { uri: b.uri } } : { context_uri: playlist.uri });
+  let devices = [];
+  try { devices = (await api('/me/player/devices'))?.devices || []; } catch {}
+  const usable = devices.filter(d => !d.is_restricted)
+    .sort((x, y) => (y.is_active - x.is_active) || ((y.type === 'Computer' || y.type === 'Smartphone') - (x.type === 'Computer' || x.type === 'Smartphone')));
+  for (const d of usable) {
+    try {
+      await api('/me/player/play?device_id=' + encodeURIComponent(d.id), { method: 'PUT', body });
+      toast((b ? `Speelt verder vanaf „${b.name}”` : 'Playlist gestart') + (d.is_active ? '' : ` op ${d.name}`));
+      return;
+    } catch (e) { if (e.status !== 403 && e.status !== 404) { toast('Hervatten mislukt: ' + e.message); return; } }
   }
+  showResumeHelp(playlist, b, devices);
+}
+
+function showResumeHelp(playlist, b, devices) {
+  const restricted = devices.filter(d => d.is_restricted).map(d => d.name);
+  const el = document.createElement('div');
+  el.style.cssText = 'position:fixed;inset:0;background:#000a;display:flex;align-items:flex-end;justify-content:center;z-index:20;padding:16px';
+  el.innerHTML = `<div class="card" style="max-width:480px;width:100%;padding:20px;margin-bottom:env(safe-area-inset-bottom)">
+      <h1 style="font-size:19px">Spotify laat dit toestel niet bedienen</h1>
+      <p class="muted">${restricted.length ? 'Spotify blokkeert bediening op afstand voor ' + esc(restricted.join(', ')) + '. '
+        : 'Spotify is momenteel op geen enkel toestel actief. '}
+        Open Spotify, start daar eender welk nummer en kom terug om opnieuw te proberen.
+        ${b ? `Of open de playlist en tik zelf op ${b.position ? 'nummer <b>' + b.position + '</b>, ' : ''}<b>${esc(b.name)}</b>.` : ''}</p>
+      <div class="actions">
+        <a class="primary" href="https://open.spotify.com/playlist/${esc(playlist.id)}" target="_blank" rel="noopener"
+          style="text-decoration:none;border-radius:999px;padding:10px 16px;background:var(--accent);color:var(--accent-text);font-weight:600">Open in Spotify</a>
+        <button id="retry">Opnieuw proberen</button>
+        <button class="link" id="close">Sluiten</button>
+      </div></div>`;
+  document.body.appendChild(el);
+  const close = () => el.remove();
+  el.onclick = e => { if (e.target === el) close(); };
+  el.querySelector('#close').onclick = close;
+  el.querySelector('#retry').onclick = () => { close(); resume(playlist); };
 }
 
 // ===== Weergave =====
