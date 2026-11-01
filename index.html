@@ -261,6 +261,7 @@ async function accessToken(force) {
 function logout() { store.del('token'); raw.del('spotify_user'); me = null; playlists = null; render(); }
 
 // ===== Spotify API =====
+let rateLimitedUntil = 0;
 async function api(path, options = {}, retried) {
   const token = await accessToken();
   if (!token) { render(); throw new Error('Niet ingelogd'); }
@@ -272,6 +273,14 @@ async function api(path, options = {}, retried) {
     // Eerst de toegang vernieuwen en één keer opnieuw proberen, pas daarna opnieuw laten inloggen.
     if (!retried && await accessToken(true)) return api(path, options, true);
     render(); throw new Error('Opnieuw inloggen nodig');
+  }
+  if (res.status === 429) {
+    // Te veel vragen in korte tijd: Spotify zegt hoeveel seconden we moeten wachten.
+    const wait = Number(res.headers.get('Retry-After')) || 5;
+    rateLimitedUntil = Date.now() + wait * 1000;
+    if (!retried && wait <= 5) { await new Promise(r => setTimeout(r, wait * 1000)); return api(path, options, true); }
+    const e = new Error(wait > 90 ? `Spotify vraagt om ${Math.ceil(wait / 60)} minuten te wachten` : `Spotify vraagt om ${wait} seconden te wachten`);
+    e.status = 429; throw e;
   }
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
@@ -293,40 +302,42 @@ async function loadPlaylists(force) {
 // Spotify geeft enkel nummers terug van playlists die je zelf maakte of waaraan je meewerkt.
 function canListTracks(p) { return p.owner?.id === me?.id || p.collaborative; }
 function trackCount(p) { return (p.items || p.tracks)?.total ?? 0; }
+const trackCache = {};
 async function loadTracks(playlistId) {
+  const snap = playlists?.find(p => p.id === playlistId)?.snapshot_id;
+  const c = trackCache[playlistId];
+  if (c && c.snap === snap) return c.tracks;
   const rows = await allPages(`/playlists/${playlistId}/items?limit=50`);
-  return rows.map(r => r.item || r.track).filter(t => t && t.uri);
+  const tracks = rows.map(r => r.item || r.track).filter(t => t && t.uri);
+  trackCache[playlistId] = { snap, tracks };
+  return tracks;
 }
 // Spotify bewaart geen aanmaakdatum van playlists. Voor eigen playlists gebruiken we de datum van het
 // eerst toegevoegde nummer; dat resultaat wordt bewaard en enkel opnieuw berekend als de playlist wijzigt.
 function playlistDate(p) {
   const d = store.get('pl_dates', {})[p.id];
-  return d && d.snap === p.snapshot_id ? d.date : undefined;
+  return d && d.snap === p.snapshot_id ? d.date : undefined;  // null = bekeken, geen datum
 }
 let datesRunning = false;
 async function loadPlaylistDates(lists, onUpdate) {
   if (datesRunning) return;
   datesRunning = true;
   try {
+    // Rustig, één playlist tegelijk en enkel de eerste 50 nummers, zodat we Spotify niet overbelasten.
     const todo = lists.filter(p => canListTracks(p) && playlistDate(p) === undefined);
-    const worker = async () => {
-      while (todo.length) {
-        const p = todo.shift();
-        let first = null, url = `/playlists/${p.id}/items?limit=100&fields=next,items(added_at)`;
-        try {
-          while (url) {
-            const page = await api(url);
-            for (const r of page.items || []) if (r.added_at && r.added_at > '1971' && (!first || r.added_at < first)) first = r.added_at;
-            url = page.next;
-          }
-        } catch { continue; }
-        const all = store.get('pl_dates', {});
-        all[p.id] = { snap: p.snapshot_id, date: first };
-        store.set('pl_dates', all);
-        onUpdate?.();
-      }
-    };
-    await Promise.all([worker(), worker(), worker()]);
+    for (const p of todo) {
+      if (Date.now() < rateLimitedUntil || document.hidden) break;
+      let first = null;
+      try {
+        const page = await api(`/playlists/${p.id}/items?limit=50&fields=items(added_at)`, {}, true);
+        for (const r of page.items || []) if (r.added_at && r.added_at > '1971' && (!first || r.added_at < first)) first = r.added_at;
+      } catch (e) { if (e.status === 429) break; }
+      const all = store.get('pl_dates', {});
+      all[p.id] = { snap: p.snapshot_id, date: first };
+      store.set('pl_dates', all);
+      onUpdate?.();
+      await new Promise(r => setTimeout(r, 500));
+    }
   } finally { datesRunning = false; }
 }
 function fmtDay(iso) { return new Date(iso).toLocaleDateString('nl-BE', { day: 'numeric', month: 'short', year: 'numeric' }); }
@@ -467,7 +478,7 @@ async function renderHome() {
     document.getElementById('filter').oninput = draw;
     draw();
     viewRefresh = draw;
-    let t; loadPlaylistDates(lists, () => { clearTimeout(t); t = setTimeout(() => { if (viewRefresh === draw) draw(); }, 300); });
+    let t; setTimeout(() => loadPlaylistDates(lists, () => { clearTimeout(t); t = setTimeout(() => { if (viewRefresh === draw) draw(); }, 300); }), 2000);
   } catch (e) { document.getElementById('lists').innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
 }
 
