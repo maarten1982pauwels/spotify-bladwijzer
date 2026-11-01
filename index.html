@@ -70,7 +70,7 @@ const API = 'https://api.spotify.com/v1';
 
 // ===== Opslag (later uit te breiden met synchronisatie) =====
 // Bladwijzers en sync-gegevens worden per Spotify-account bewaard, zodat meerdere mensen hetzelfde toestel kunnen gebruiken.
-const PER_USER = ['bladwijzers', 'pl_cache', 'gh_token', 'gist_id', 'gist_etag', 'gist_last', 'last_sync', 'sync_error'];
+const PER_USER = ['bladwijzers', 'gh_token', 'gist_id', 'gist_etag', 'gist_last', 'last_sync', 'sync_error'];
 const raw = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
   set(key, v) { try { localStorage.setItem(key, v); } catch {} },
@@ -261,22 +261,7 @@ async function accessToken(force) {
 function logout() { store.del('token'); raw.del('spotify_user'); me = null; playlists = null; render(); }
 
 // ===== Spotify API =====
-// Als Spotify de app afremt (fout 429), vragen we niets meer tot de wachttijd voorbij is. Elke extra vraag
-// tijdens een blokkade kan die blokkade verlengen. De wachttijd wordt onthouden, ook als je de app sluit.
-let rateLimitedUntil = Number(raw.get('rl_until')) || 0;
-let retryTimer;
-function scheduleRetryRender() {
-  clearTimeout(retryTimer);
-  const ms = rateLimitedUntil - Date.now();
-  if (ms > 0) retryTimer = setTimeout(() => { if (!document.hidden && !location.hash.startsWith('playlist/')) render(); }, ms + 500);
-}
-function rateLimitError() {
-  const t = new Date(rateLimitedUntil).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
-  const e = new Error(`Spotify heeft de app even afgeremd. Ze probeert het opnieuw om ${t}.`);
-  e.status = 429; return e;
-}
 async function api(path, options = {}, retried) {
-  if (Date.now() < rateLimitedUntil) throw rateLimitError();
   const token = await accessToken();
   if (!token) { render(); throw new Error('Niet ingelogd'); }
   const res = await fetch(path.startsWith('http') ? path : API + path, {
@@ -288,20 +273,6 @@ async function api(path, options = {}, retried) {
     if (!retried && await accessToken(true)) return api(path, options, true);
     render(); throw new Error('Opnieuw inloggen nodig');
   }
-  if (res.status === 429) {
-    // Te veel vragen in korte tijd: Spotify zegt hoeveel seconden we moeten wachten.
-    // Kan de browser de wachttijd niet lezen, dan wachten we telkens langer: 30 s, 1, 2, 4 … tot 10 minuten.
-    const header = Number(res.headers.get('Retry-After'));
-    const backoff = Math.min((Number(raw.get('rl_backoff')) || 15) * 2, 600);
-    const wait = header > 0 ? header : backoff;
-    if (!(header > 0)) raw.set('rl_backoff', String(backoff));
-    rateLimitedUntil = Date.now() + wait * 1000;
-    raw.set('rl_until', String(rateLimitedUntil));
-    scheduleRetryRender();
-    if (!retried && header > 0 && header <= 3) { await new Promise(r => setTimeout(r, header * 1000)); return api(path, options, true); }
-    throw rateLimitError();
-  }
-  raw.del('rl_backoff');
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
   if (!res.ok) { const e = new Error(data?.error?.message || ('Fout ' + res.status)); e.status = res.status; e.reason = data?.error?.reason; throw e; }
@@ -313,38 +284,18 @@ async function allPages(path) {
   return items;
 }
 let me = null, playlists = null;
-// De lijst met playlists wordt ook lokaal bewaard, zodat de app iets kan tonen als Spotify even niet antwoordt.
-let playlistsFromCache = false;
 async function loadPlaylists(force) {
-  if (playlists && !force && !playlistsFromCache) return playlists;
-  try {
-    try { await ensureUser(); } catch (e) { if (!raw.get('spotify_user')) throw e; }
-    playlists = (await allPages('/me/playlists?limit=50')).filter(Boolean);
-    playlistsFromCache = false;
-    store.set('pl_cache', playlists.map(p => ({ id: p.id, name: p.name, uri: p.uri, snapshot_id: p.snapshot_id,
-      owner: { id: p.owner?.id }, collaborative: p.collaborative,
-      images: p.images?.length ? [p.images.at(-1), p.images[0]].filter(Boolean).map(i => ({ url: i.url })) : [],
-      items: { total: trackCount(p) } })));
-  } catch (e) {
-    const cached = store.get('pl_cache', null);
-    if (!cached) throw e;
-    playlists = cached; playlistsFromCache = true;
-    if (e.status === 429) toast(e.message);
-  }
+  if (playlists && !force) return playlists;
+  await ensureUser();
+  playlists = (await allPages('/me/playlists?limit=50')).filter(Boolean);
   return playlists;
 }
 // Spotify geeft enkel nummers terug van playlists die je zelf maakte of waaraan je meewerkt.
-function canListTracks(p) { return p.owner?.id === (me?.id || raw.get('spotify_user')) || p.collaborative; }
+function canListTracks(p) { return p.owner?.id === me?.id || p.collaborative; }
 function trackCount(p) { return (p.items || p.tracks)?.total ?? 0; }
-const trackCache = {};
 async function loadTracks(playlistId) {
-  const snap = playlists?.find(p => p.id === playlistId)?.snapshot_id;
-  const c = trackCache[playlistId];
-  if (c && c.snap === snap) return c.tracks;
   const rows = await allPages(`/playlists/${playlistId}/items?limit=50`);
-  const tracks = rows.map(r => r.item || r.track).filter(t => t && t.uri);
-  trackCache[playlistId] = { snap, tracks };
-  return tracks;
+  return rows.map(r => r.item || r.track).filter(t => t && t.uri);
 }
 function simplify(track, position) {
   return {
@@ -600,10 +551,9 @@ function renderSettings() {
   document.getElementById('conntest').onclick = testConnection;
   updateSyncStatus();
   renderAccount();
-  if (Date.now() < rateLimitedUntil) document.getElementById('conntestresult').textContent = rateLimitError().message;
 }
 
-// Doet precies één vraag aan Spotify, ook tijdens een wachttijd, en toont het eerlijke antwoord.
+// Doet precies één vraag aan Spotify en toont het eerlijke antwoord.
 async function testConnection() {
   const out = document.getElementById('conntestresult');
   out.style.color = '';
@@ -616,10 +566,8 @@ async function testConnection() {
   let msg = '';
   try { msg = (await res.json())?.error?.message || ''; } catch {}
   if (res.ok) {
-    rateLimitedUntil = 0; raw.del('rl_until'); raw.del('rl_backoff');
     out.style.color = 'var(--accent)';
-    out.textContent = `✓ Spotify antwoordt normaal (code ${res.status}). Er is geen blokkade meer; de wachttijd is gewist.`;
-    playlistsFromCache = true;
+    out.textContent = `✓ Spotify antwoordt normaal (code ${res.status}).`;
     return;
   }
   out.style.color = 'var(--danger)';
@@ -702,9 +650,8 @@ document.addEventListener('visibilitychange', () => {
   if (!location.hash) render();
   syncAndRefresh();
 });
-// Opruimen: aanmaakdatums uit een vorige versie.
-try { Object.keys(localStorage).filter(k => k.startsWith('pl_dates')).forEach(k => localStorage.removeItem(k)); } catch {}
-scheduleRetryRender();
+// Opruimen: gegevens van tussenversies (datums, wachttijden, cache).
+try { Object.keys(localStorage).filter(k => /^(pl_dates|pl_cache|rl_until|rl_backoff)/.test(k)).forEach(k => localStorage.removeItem(k)); } catch {}
 handleRedirect().catch(e => toast(e.message)).finally(() => { render(); syncAndRefresh(); });
 </script>
 </body>
