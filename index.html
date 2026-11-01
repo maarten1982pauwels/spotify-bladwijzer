@@ -305,16 +305,17 @@ async function render() {
   }
   const route = location.hash.slice(1);
   if (route.startsWith('playlist/')) return renderPlaylist(route.slice(9));
+  if (route === 'instellingen') return renderSettings();
   return renderHome();
 }
 
 async function renderHome() {
-  app.innerHTML = `<header><h1>Playlist Bladwijzer</h1><button class="link" id="logout">Uitloggen</button></header>
+  app.innerHTML = `<header><h1>Playlist Bladwijzer</h1><button class="small" id="settings" aria-label="Instellingen">⚙︎ Instellingen</button></header>
+    <div id="syncline"></div>
     <h2>Nu aan het spelen</h2><div id="now" class="card muted">Laden…</div>
     <h2>Je playlists</h2><input type="search" id="filter" placeholder="Zoek een playlist">
-    <div id="lists" class="list" style="margin-top:8px"><p class="muted">Laden…</p></div>
-    <h2>Synchronisatie tussen Mac en iPhone</h2><div id="sync" class="card"></div>`;
-  document.getElementById('logout').onclick = logout;
+    <div id="lists" class="list" style="margin-top:8px"><p class="muted">Laden…</p></div>`;
+  document.getElementById('settings').onclick = () => location.hash = 'instellingen';
   updateSyncStatus();
   renderNowPlaying();
   try {
@@ -430,29 +431,63 @@ async function renderPlaylist(id) {
   }
 }
 
+function renderSettings() {
+  app.innerHTML = `<header><button class="link" id="back">‹ Terug</button></header>
+    <h1>Instellingen</h1>
+    <h2>Synchronisatie tussen Mac en iPhone</h2>
+    <div id="sync" class="card"></div>
+    <h2>Spotify</h2>
+    <div class="card"><div class="muted">Je bent ingelogd met Spotify.</div>
+      <div class="actions"><button class="small" id="logout">Uitloggen</button></div></div>`;
+  document.getElementById('back').onclick = () => location.hash = '';
+  document.getElementById('logout').onclick = () => { location.hash = ''; logout(); };
+  updateSyncStatus();
+}
+
 function updateSyncStatus() {
+  const err = store.get('sync_error', null), last = store.get('last_sync', null);
+  const statusText = err ? 'Synchroniseren mislukt: ' + esc(err)
+    : last ? 'Gesynchroniseerd op ' + fmtDate(last) : 'Nog niet gesynchroniseerd';
+
+  // Korte status op het startscherm
+  const line = document.getElementById('syncline');
+  if (line) {
+    line.innerHTML = !sync.token()
+      ? `<div class="card row" style="cursor:pointer"><div class="grow muted">Sync tussen Mac en iPhone staat uit.</div><span class="bookmark">Instellen ›</span></div>`
+      : err ? `<div class="card" style="cursor:pointer;color:var(--danger)">${statusText} <span class="muted">· Bekijk ›</span></div>` : '';
+    line.onclick = () => location.hash = 'instellingen';
+  }
+
+  // Volledig scherm in Instellingen
   const el = document.getElementById('sync');
   if (!el) return;
   if (!sync.token()) {
-    el.innerHTML = `<div class="muted">Plak hier je GitHub-token om je bladwijzers op al je toestellen gelijk te houden.</div>
-      <div class="actions"><input type="password" id="ghtoken" placeholder="github_pat_…" autocomplete="off"
-        style="flex:1;min-width:0;font:inherit;padding:10px 14px;border-radius:999px;border:1px solid var(--card2);background:var(--bg);color:var(--text)">
-      <button class="primary" id="ghconnect">Koppel</button></div>`;
+    el.innerHTML = `<div class="muted">Je bladwijzers worden bewaard in een geheime gist op je GitHub-account.
+        Gebruik op je Mac en je iPhone hetzelfde token, dan zie je op beide toestellen dezelfde bladwijzers.</div>
+      <ol class="muted" style="padding-left:20px">
+        <li>Maak een token op <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener" style="color:var(--accent)">GitHub</a>.</li>
+        <li>Zet onder <b>Account permissions</b> enkel <b>Gists</b> op <b>Read and write</b>.</li>
+        <li>Kopieer het token en plak het hieronder.</li>
+      </ol>
+      <label class="muted" for="ghtoken">GitHub-token</label>
+      <input type="password" id="ghtoken" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" spellcheck="false"
+        style="display:block;width:100%;margin-top:6px;font:inherit;padding:10px 14px;border-radius:999px;border:1px solid var(--card2);background:var(--bg);color:var(--text)">
+      <div class="actions"><button class="primary" id="ghconnect">Koppel</button></div>`;
     document.getElementById('ghconnect').onclick = async () => {
       const v = document.getElementById('ghtoken').value;
-      if (!v.trim()) return;
-      try { await sync.connect(v); toast('Synchronisatie staat aan'); render(); }
-      catch (e) { toast('Koppelen mislukt: ' + e.message); }
+      if (!v.trim()) { toast('Plak eerst je token'); return; }
+      const btn = document.getElementById('ghconnect'); btn.disabled = true; btn.textContent = 'Bezig…';
+      try { await sync.connect(v); toast('Synchronisatie staat aan'); updateSyncStatus(); }
+      catch (e) { toast('Koppelen mislukt: ' + e.message); btn.disabled = false; btn.textContent = 'Koppel'; }
     };
     return;
   }
-  const err = store.get('sync_error', null), last = store.get('last_sync', null);
-  el.innerHTML = `<div class="${err ? '' : 'muted'}" style="${err ? 'color:var(--danger)' : ''}">
-      ${err ? 'Synchroniseren mislukt: ' + esc(err) : last ? 'Gesynchroniseerd op ' + fmtDate(last) : 'Nog niet gesynchroniseerd'}</div>
+  el.innerHTML = `<div style="${err ? 'color:var(--danger)' : ''}">${err ? statusText : '✓ Synchronisatie staat aan'}</div>
+    ${err ? '' : `<div class="muted">${statusText}</div>`}
     <div class="actions"><button class="small" id="syncnow">Nu synchroniseren</button>
       <button class="small" id="syncoff">Ontkoppel</button></div>`;
-  document.getElementById('syncnow').onclick = () => { toast('Bezig…'); syncAndRefresh(); };
-  document.getElementById('syncoff').onclick = () => { sync.disconnect(); updateSyncStatus(); };
+  document.getElementById('syncnow').onclick = () => { toast('Bezig…'); syncAndRefresh().then(() => toast('Klaar')); };
+  document.getElementById('syncoff').onclick = () => { sync.disconnect(); updateSyncStatus(); toast('Synchronisatie staat uit op dit toestel'); };
 }
 
 window.addEventListener('hashchange', render);
