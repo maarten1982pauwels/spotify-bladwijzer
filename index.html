@@ -264,6 +264,12 @@ function logout() { store.del('token'); raw.del('spotify_user'); me = null; play
 // Als Spotify de app afremt (fout 429), vragen we niets meer tot de wachttijd voorbij is. Elke extra vraag
 // tijdens een blokkade kan die blokkade verlengen. De wachttijd wordt onthouden, ook als je de app sluit.
 let rateLimitedUntil = Number(raw.get('rl_until')) || 0;
+let retryTimer;
+function scheduleRetryRender() {
+  clearTimeout(retryTimer);
+  const ms = rateLimitedUntil - Date.now();
+  if (ms > 0) retryTimer = setTimeout(() => { if (!document.hidden && !location.hash.startsWith('playlist/')) render(); }, ms + 500);
+}
 function rateLimitError() {
   const t = new Date(rateLimitedUntil).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
   const e = new Error(`Spotify heeft de app even afgeremd. Ze probeert het opnieuw om ${t}.`);
@@ -291,6 +297,7 @@ async function api(path, options = {}, retried) {
     if (!(header > 0)) raw.set('rl_backoff', String(backoff));
     rateLimitedUntil = Date.now() + wait * 1000;
     raw.set('rl_until', String(rateLimitedUntil));
+    scheduleRetryRender();
     if (!retried && header > 0 && header <= 3) { await new Promise(r => setTimeout(r, header * 1000)); return api(path, options, true); }
     throw rateLimitError();
   }
@@ -336,6 +343,11 @@ async function loadTracks(playlistId) {
   if (c && c.snap === snap) return c.tracks;
   const rows = await allPages(`/playlists/${playlistId}/items?limit=50`);
   const tracks = rows.map(r => r.item || r.track).filter(t => t && t.uri);
+  // Aanmaakdatum = datum van het eerst toegevoegde nummer, berekend uit de lijst die we toch al ophaalden.
+  const first = rows.map(r => r.added_at).filter(d => d && d > '1971').sort()[0] || null;
+  const dates = store.get('pl_dates', {});
+  dates[playlistId] = { snap, date: first };
+  store.set('pl_dates', dates);
   trackCache[playlistId] = { snap, tracks };
   return tracks;
 }
@@ -344,28 +356,6 @@ async function loadTracks(playlistId) {
 function playlistDate(p) {
   const d = store.get('pl_dates', {})[p.id];
   return d && d.snap === p.snapshot_id ? d.date : undefined;  // null = bekeken, geen datum
-}
-let datesRunning = false;
-async function loadPlaylistDates(lists, onUpdate) {
-  if (datesRunning) return;
-  datesRunning = true;
-  try {
-    // Rustig, één playlist tegelijk en enkel de eerste 50 nummers, zodat we Spotify niet overbelasten.
-    const todo = lists.filter(p => canListTracks(p) && playlistDate(p) === undefined);
-    for (const p of todo) {
-      if (Date.now() < rateLimitedUntil || document.hidden) break;
-      let first = null;
-      try {
-        const page = await api(`/playlists/${p.id}/items?limit=50&fields=items(added_at)`, {}, true);
-        for (const r of page.items || []) if (r.added_at && r.added_at > '1971' && (!first || r.added_at < first)) first = r.added_at;
-      } catch (e) { if (e.status === 429) break; }
-      const all = store.get('pl_dates', {});
-      all[p.id] = { snap: p.snapshot_id, date: first };
-      store.set('pl_dates', all);
-      onUpdate?.();
-      await new Promise(r => setTimeout(r, 500));
-    }
-  } finally { datesRunning = false; }
 }
 function fmtDay(iso) { return new Date(iso).toLocaleDateString('nl-BE', { day: 'numeric', month: 'short', year: 'numeric' }); }
 
@@ -505,7 +495,6 @@ async function renderHome() {
     document.getElementById('filter').oninput = draw;
     draw();
     viewRefresh = draw;
-    let t; setTimeout(() => loadPlaylistDates(lists, () => { clearTimeout(t); t = setTimeout(() => { if (viewRefresh === draw) draw(); }, 300); }), 2000);
   } catch (e) { document.getElementById('lists').innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
 }
 
@@ -543,7 +532,7 @@ async function renderPlaylist(id) {
   const b = bookmarks.get(id);
   app.innerHTML = `<header><button class="link" id="back">‹ Terug</button></header>
     <div class="row"><img class="cover big" src="${esc(p.images?.[0]?.url || '')}" alt="">
-      <div class="grow"><h1>${esc(p.name)}</h1><div class="muted">${trackCount(p)} nummers${playlistDate(p) ? ' · aangemaakt ' + fmtDay(playlistDate(p)) : ''}</div></div></div>
+      <div class="grow"><h1>${esc(p.name)}</h1><div class="muted" id="plmeta">${trackCount(p)} nummers${playlistDate(p) ? ' · aangemaakt ' + fmtDay(playlistDate(p)) : ''}</div></div></div>
     <div class="card" style="margin-top:16px" id="bm"></div>
     <h2>Kies het laatste nummer zelf</h2>
     <input type="search" id="q" placeholder="${canListTracks(p) ? 'Filter de nummers' : 'Zoek een nummer op titel of artiest'}">
@@ -592,6 +581,8 @@ async function renderPlaylist(id) {
     tracksEl.innerHTML = '<p class="muted">Nummers laden…</p>';
     try {
       const all = (await loadTracks(id)).map((t, i) => ({ t, n: i + 1 }));
+      const meta = document.getElementById('plmeta');
+      if (meta && playlistDate(p)) meta.textContent = `${trackCount(p)} nummers · aangemaakt ${fmtDay(playlistDate(p))}`;
       drawTracks(all, true);
       q.oninput = () => { const s = q.value.toLowerCase();
         drawTracks(all.filter(({ t }) => (t.name + ' ' + simplify(t).artists).toLowerCase().includes(s)), true); };
@@ -727,6 +718,7 @@ document.addEventListener('visibilitychange', () => {
   if (!location.hash) render();
   syncAndRefresh();
 });
+scheduleRetryRender();
 handleRedirect().catch(e => toast(e.message)).finally(() => { render(); syncAndRefresh(); });
 </script>
 </body>
