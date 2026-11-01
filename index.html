@@ -60,6 +60,8 @@
 
 <script>
 // ===== Instellingen =====
+// Bij elke aanpassing verhogen, zodat je in Instellingen ziet of je de nieuwste versie hebt.
+const APP_VERSION = '1.0 · 1 nov 2026, 14:57';
 const CLIENT_ID = '9424577e9fef406fb126cfcfeaa47105';
 const REDIRECT_URI = location.origin + location.pathname;
 const SCOPES = [
@@ -559,7 +561,8 @@ function renderSettings() {
         <button class="small" id="conntest">Test verbinding</button></div>
       <div id="conntestresult" class="muted" style="margin-top:8px"></div></div>
     <h2>Synchronisatie tussen Mac en iPhone</h2>
-    <div id="sync" class="card"></div>`;
+    <div id="sync" class="card"></div>
+    <p class="muted" style="text-align:center;margin-top:32px">Versie ${APP_VERSION}</p>`;
   document.getElementById('back').onclick = () => location.hash = '';
   document.getElementById('logout').onclick = () => { location.hash = ''; logout(); };
   document.getElementById('conntest').onclick = testConnection;
