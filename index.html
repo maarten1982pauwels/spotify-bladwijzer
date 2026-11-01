@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Playlist Bladwijzer</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Bladwijzer">
+<meta name="theme-color" content="#121212">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<style>
+  :root {
+    --bg: #121212; --card: #1e1e1e; --card2: #2a2a2a; --text: #f2f2f2;
+    --muted: #a7a7a7; --accent: #1ed760; --accent-text: #0b0b0b; --danger: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { padding: env(safe-area-inset-top) 16px calc(24px + env(safe-area-inset-bottom)); }
+  main { max-width: 720px; margin: 0 auto; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 0 8px; }
+  h1 { font-size: 22px; margin: 0; }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 24px 0 8px; }
+  button { font: inherit; border: 0; border-radius: 999px; padding: 10px 16px; cursor: pointer;
+    background: var(--card2); color: var(--text); }
+  button.primary { background: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button.small { padding: 6px 12px; font-size: 14px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .link { background: none; color: var(--muted); padding: 6px 0; }
+  .card { background: var(--card); border-radius: 12px; padding: 12px; }
+  .row { display: flex; align-items: center; gap: 12px; }
+  .grow { flex: 1; min-width: 0; }
+  .ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .cover { width: 56px; height: 56px; border-radius: 6px; object-fit: cover; background: var(--card2); flex: none; }
+  img[src=""] { visibility: hidden; }
+  .cover.big { width: 96px; height: 96px; }
+  .list { display: flex; flex-direction: column; gap: 8px; }
+  .list .card { cursor: pointer; }
+  .bookmark { color: var(--accent); font-size: 14px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  input[type=search] { width: 100%; font: inherit; padding: 10px 14px; border-radius: 999px;
+    border: 1px solid var(--card2); background: var(--card); color: var(--text); }
+  .track { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 8px; cursor: pointer; }
+  .track:hover { background: var(--card); }
+  .track.saved { background: #1ed76022; }
+  .num { width: 32px; text-align: right; color: var(--muted); font-size: 14px; flex: none; }
+  #toast { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+    background: #333; color: #fff; padding: 10px 16px; border-radius: 10px; max-width: 90vw; display: none; z-index: 10; }
+  .center { text-align: center; padding: 48px 0; }
+</style>
+</head>
+<body>
+<main id="app"><p class="center muted">Laden…</p></main>
+<div id="toast"></div>
+
+<script>
+// ===== Instellingen =====
+const CLIENT_ID = '9424577e9fef406fb126cfcfeaa47105';
+const REDIRECT_URI = location.origin + location.pathname;
+const SCOPES = [
+  'playlist-read-private', 'playlist-read-collaborative',
+  'user-read-currently-playing', 'user-read-playback-state', 'user-modify-playback-state'
+].join(' ');
+const API = 'https://api.spotify.com/v1';
+
+// ===== Opslag (later uit te breiden met synchronisatie) =====
+const store = {
+  get(key, fallback) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; } },
+  set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} },
+  del(key) { try { localStorage.removeItem(key); } catch {} }
+};
+const bookmarks = {
+  all() { return store.get('bladwijzers', {}); },
+  get(playlistId) { return this.all()[playlistId]; },
+  save(playlistId, data) { const all = this.all(); all[playlistId] = { ...data, savedAt: new Date().toISOString() }; store.set('bladwijzers', all); },
+  remove(playlistId) { const all = this.all(); delete all[playlistId]; store.set('bladwijzers', all); }
+};
+
+// ===== Inloggen met Spotify (PKCE, geen geheim nodig) =====
+function randomString(len) {
+  const bytes = crypto.getRandomValues(new Uint8Array(len));
+  return Array.from(bytes, b => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'[b % 62]).join('');
+}
+async function sha256base64url(text) {
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return btoa(String.fromCharCode(...new Uint8Array(hash))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+async function login() {
+  const verifier = randomString(64);
+  store.set('pkce_verifier', verifier);
+  const params = new URLSearchParams({
+    client_id: CLIENT_ID, response_type: 'code', redirect_uri: REDIRECT_URI, scope: SCOPES,
+    code_challenge_method: 'S256', code_challenge: await sha256base64url(verifier)
+  });
+  location.href = 'https://accounts.spotify.com/authorize?' + params;
+}
+async function tokenRequest(body) {
+  const res = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: CLIENT_ID, ...body })
+  });
+  if (!res.ok) throw new Error('Inloggen mislukt (' + res.status + ')');
+  const t = await res.json();
+  const old = store.get('token', {});
+  store.set('token', {
+    access: t.access_token, refresh: t.refresh_token || old.refresh,
+    expires: Date.now() + (t.expires_in - 60) * 1000
+  });
+}
+async function handleRedirect() {
+  const params = new URLSearchParams(location.search);
+  if (params.get('error')) { history.replaceState(null, '', REDIRECT_URI); toast('Inloggen geannuleerd'); return; }
+  const code = params.get('code');
+  if (!code) return;
+  history.replaceState(null, '', REDIRECT_URI);
+  await tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: REDIRECT_URI, code_verifier: store.get('pkce_verifier', '') });
+  store.del('pkce_verifier');
+}
+async function accessToken() {
+  const t = store.get('token', null);
+  if (!t) return null;
+  if (Date.now() < t.expires) return t.access;
+  try { await tokenRequest({ grant_type: 'refresh_token', refresh_token: t.refresh }); }
+  catch { store.del('token'); return null; }
+  return store.get('token').access;
+}
+function logout() { store.del('token'); render(); }
+
+// ===== Spotify API =====
+async function api(path, options = {}) {
+  const token = await accessToken();
+  if (!token) { render(); throw new Error('Niet ingelogd'); }
+  const res = await fetch(path.startsWith('http') ? path : API + path, {
+    ...options, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(options.headers || {}) }
+  });
+  if (res.status === 204) return null;
+  if (res.status === 401) { store.del('token'); render(); throw new Error('Opnieuw inloggen nodig'); }
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!res.ok) { const e = new Error(data?.error?.message || ('Fout ' + res.status)); e.status = res.status; e.reason = data?.error?.reason; throw e; }
+  return data;
+}
+async function allPages(path) {
+  let url = path, items = [];
+  while (url) { const page = await api(url); items.push(...page.items); url = page.next; }
+  return items;
+}
+let me = null, playlists = null;
+async function loadPlaylists(force) {
+  if (playlists && !force) return playlists;
+  me = me || await api('/me');
+  playlists = (await allPages('/me/playlists?limit=50')).filter(Boolean);
+  return playlists;
+}
+// Spotify geeft enkel nummers terug van playlists die je zelf maakte of waaraan je meewerkt.
+function canListTracks(p) { return p.owner?.id === me?.id || p.collaborative; }
+function trackCount(p) { return (p.items || p.tracks)?.total ?? 0; }
+async function loadTracks(playlistId) {
+  const rows = await allPages(`/playlists/${playlistId}/items?limit=50`);
+  return rows.map(r => r.item || r.track).filter(t => t && t.uri);
+}
+function simplify(track, position) {
+  return {
+    uri: track.uri, name: track.name,
+    artists: (track.artists || []).map(a => a.name).join(', '),
+    image: track.album?.images?.at(-1)?.url || track.album?.images?.[0]?.url || '',
+    position: position ?? null
+  };
+}
+
+// ===== Hervatten =====
+async function resume(playlist) {
+  const b = bookmarks.get(playlist.id);
+  const body = { context_uri: playlist.uri };
+  if (b) body.offset = { uri: b.uri };
+  try {
+    await api('/me/player/play', { method: 'PUT', body: JSON.stringify(body) });
+    toast(b ? `Speelt verder vanaf „${b.name}”` : 'Playlist gestart');
+  } catch (e) {
+    if (e.status === 404) {
+      // Geen actief toestel: probeer het eerste beschikbare toestel.
+      const { devices } = await api('/me/player/devices');
+      if (devices?.length) {
+        await api('/me/player/play?device_id=' + devices[0].id, { method: 'PUT', body: JSON.stringify(body) });
+        toast(`Speelt verder op ${devices[0].name}`);
+      } else {
+        toast('Open eerst Spotify op je Mac of iPhone en probeer opnieuw.');
+      }
+    } else toast('Hervatten mislukt: ' + e.message);
+  }
+}
+
+// ===== Weergave =====
+const app = document.getElementById('app');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let toastTimer;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.style.display = 'block';
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.style.display = 'none', 3500);
+}
+function fmtDate(iso) {
+  return new Date(iso).toLocaleString('nl-BE', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+function bookmarkLine(b) {
+  if (!b) return '<span class="muted">Nog geen bladwijzer</span>';
+  return `<span class="bookmark">▶ ${b.position ? '#' + b.position + ' · ' : ''}${esc(b.name)}</span> <span class="muted">· ${esc(b.artists)}</span>`;
+}
+
+async function render() {
+  const token = await accessToken();
+  if (!token) {
+    app.innerHTML = `<div class="center">
+      <h1>Playlist Bladwijzer</h1>
+      <p class="muted">Onthoud per playlist waar je gebleven was.</p>
+      <button class="primary" id="login">Inloggen met Spotify</button></div>`;
+    document.getElementById('login').onclick = login;
+    return;
+  }
+  const route = location.hash.slice(1);
+  if (route.startsWith('playlist/')) return renderPlaylist(route.slice(9));
+  return renderHome();
+}
+
+async function renderHome() {
+  app.innerHTML = `<header><h1>Playlist Bladwijzer</h1><button class="link" id="logout">Uitloggen</button></header>
+    <h2>Nu aan het spelen</h2><div id="now" class="card muted">Laden…</div>
+    <h2>Je playlists</h2><input type="search" id="filter" placeholder="Zoek een playlist">
+    <div id="lists" class="list" style="margin-top:8px"><p class="muted">Laden…</p></div>`;
+  document.getElementById('logout').onclick = logout;
+  renderNowPlaying();
+  try {
+    const lists = await loadPlaylists();
+    const draw = () => {
+      const q = document.getElementById('filter').value.toLowerCase();
+      const all = bookmarks.all();
+      const shown = lists.filter(p => p.name.toLowerCase().includes(q))
+        .sort((a, b) => (all[b.id]?.savedAt || '').localeCompare(all[a.id]?.savedAt || ''));
+      document.getElementById('lists').innerHTML = shown.map(p => `
+        <div class="card row" data-id="${p.id}">
+          <img class="cover" src="${esc(p.images?.at(-1)?.url || p.images?.[0]?.url || '')}" alt="">
+          <div class="grow"><div class="ellipsis"><b>${esc(p.name)}</b></div>
+            <div class="ellipsis">${bookmarkLine(all[p.id])}</div></div>
+        </div>`).join('') || '<p class="muted">Geen playlists gevonden.</p>';
+      document.querySelectorAll('#lists .card').forEach(el => el.onclick = () => location.hash = 'playlist/' + el.dataset.id);
+    };
+    document.getElementById('filter').oninput = draw;
+    draw();
+  } catch (e) { document.getElementById('lists').innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
+}
+
+async function renderNowPlaying() {
+  const el = document.getElementById('now');
+  try {
+    const now = await api('/me/player/currently-playing');
+    if (!now || !now.item) { el.textContent = 'Er speelt momenteel niets op Spotify.'; return; }
+    const t = now.item;
+    const ctx = now.context?.type === 'playlist' ? now.context.uri.split(':').pop() : null;
+    const lists = await loadPlaylists();
+    const p = ctx && lists.find(x => x.id === ctx);
+    el.classList.remove('muted');
+    el.innerHTML = `<div class="row">
+        <img class="cover" src="${esc(simplify(t).image)}" alt="">
+        <div class="grow"><div class="ellipsis"><b>${esc(t.name)}</b></div>
+          <div class="muted ellipsis">${esc(simplify(t).artists)}</div>
+          <div class="muted ellipsis">${p ? 'Uit playlist: ' + esc(p.name) : 'Niet vanuit een van je playlists'}</div></div></div>
+      ${p ? `<div class="actions"><button class="primary" id="savenow">Bewaar als bladwijzer</button></div>` : ''}`;
+    if (p) document.getElementById('savenow').onclick = async () => {
+      let position = null;
+      if (canListTracks(p)) { try { position = (await loadTracks(p.id)).findIndex(x => x.uri === t.uri) + 1 || null; } catch {} }
+      bookmarks.save(p.id, simplify(t, position));
+      toast(`Bewaard voor „${p.name}”`);
+      renderHome();
+    };
+  } catch (e) { el.textContent = 'Kon niet ophalen wat er speelt: ' + e.message; }
+}
+
+async function renderPlaylist(id) {
+  app.innerHTML = '<p class="center muted">Laden…</p>';
+  const lists = await loadPlaylists();
+  const p = lists.find(x => x.id === id);
+  if (!p) { location.hash = ''; return; }
+  const b = bookmarks.get(id);
+  app.innerHTML = `<header><button class="link" id="back">‹ Terug</button></header>
+    <div class="row"><img class="cover big" src="${esc(p.images?.[0]?.url || '')}" alt="">
+      <div class="grow"><h1>${esc(p.name)}</h1><div class="muted">${trackCount(p)} nummers</div></div></div>
+    <div class="card" style="margin-top:16px">
+      <div class="muted">Laatst gebleven bij</div>
+      <div>${bookmarkLine(b)}</div>
+      ${b ? `<div class="muted">Bewaard op ${fmtDate(b.savedAt)}</div>` : ''}
+      <div class="actions">
+        <button class="primary" id="resume">${b ? 'Hervat vanaf dit nummer' : 'Speel playlist af'}</button>
+        ${b ? '<button id="clear">Wis bladwijzer</button>' : ''}
+      </div></div>
+    <h2>Kies het laatste nummer zelf</h2>
+    <input type="search" id="q" placeholder="${canListTracks(p) ? 'Filter de nummers' : 'Zoek een nummer op titel of artiest'}">
+    <div id="tracks" style="margin-top:8px"></div>`;
+  document.getElementById('back').onclick = () => location.hash = '';
+  document.getElementById('resume').onclick = () => resume(p);
+  if (b) document.getElementById('clear').onclick = () => { bookmarks.remove(id); renderPlaylist(id); };
+
+  const tracksEl = document.getElementById('tracks');
+  const q = document.getElementById('q');
+  const pick = (track, position) => {
+    bookmarks.save(id, simplify(track, position));
+    toast('Bladwijzer bewaard');
+    renderPlaylist(id); window.scrollTo(0, 0);
+  };
+  const drawTracks = (tracks, numbered) => {
+    const saved = bookmarks.get(id)?.uri;
+    tracksEl.innerHTML = tracks.map(({ t, n }) => `
+      <div class="track ${t.uri === saved ? 'saved' : ''}" data-uri="${esc(t.uri)}">
+        ${numbered ? `<span class="num">${n}</span>` : ''}
+        <img class="cover" style="width:40px;height:40px" src="${esc(simplify(t).image)}" alt="">
+        <div class="grow"><div class="ellipsis">${esc(t.name)}</div><div class="muted ellipsis">${esc(simplify(t).artists)}</div></div>
+      </div>`).join('') || '<p class="muted">Geen nummers gevonden.</p>';
+    tracksEl.querySelectorAll('.track').forEach(el => el.onclick = () => {
+      const hit = tracks.find(x => x.t.uri === el.dataset.uri);
+      pick(hit.t, numbered ? hit.n : null);
+    });
+  };
+
+  if (canListTracks(p)) {
+    tracksEl.innerHTML = '<p class="muted">Nummers laden…</p>';
+    try {
+      const all = (await loadTracks(id)).map((t, i) => ({ t, n: i + 1 }));
+      drawTracks(all, true);
+      q.oninput = () => { const s = q.value.toLowerCase();
+        drawTracks(all.filter(({ t }) => (t.name + ' ' + simplify(t).artists).toLowerCase().includes(s)), true); };
+    } catch (e) { tracksEl.innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
+  } else {
+    tracksEl.innerHTML = `<p class="muted">Spotify toont de nummers van playlists van anderen niet aan zelfgemaakte apps.
+      Zoek het nummer hieronder, of bewaar het vanaf het startscherm terwijl het speelt.</p>`;
+    let timer;
+    q.oninput = () => { clearTimeout(timer); timer = setTimeout(async () => {
+      if (q.value.trim().length < 2) return;
+      try {
+        const res = await api('/search?type=track&limit=10&q=' + encodeURIComponent(q.value));
+        drawTracks(res.tracks.items.map(t => ({ t })), false);
+      } catch (e) { tracksEl.innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
+    }, 400); };
+  }
+}
+
+window.addEventListener('hashchange', render);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !location.hash) render(); });
+handleRedirect().catch(e => toast(e.message)).finally(render);
+</script>
+</body>
+</html>
