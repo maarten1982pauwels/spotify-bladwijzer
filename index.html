@@ -61,7 +61,7 @@
 <script>
 // ===== Instellingen =====
 // Bij elke aanpassing verhogen, zodat je in Instellingen ziet of je de nieuwste versie hebt.
-const APP_VERSION = '1.2 · 1 nov 2026, 17:47';
+const APP_VERSION = '1.3 · 1 nov 2026, 17:54';
 const CLIENT_ID = '38794784e4964f45ad7912762eb8a82e';
 const REDIRECT_URI = location.origin + location.pathname;
 const SCOPES = [
@@ -224,6 +224,7 @@ async function tokenRequest(body) {
   const t = await res.json();
   const old = store.get('token', {});
   store.set('token', {
+    client: CLIENT_ID,
     access: t.access_token, refresh: t.refresh_token || old.refresh,
     expires: Date.now() + (t.expires_in - 60) * 1000
   });
@@ -243,6 +244,8 @@ let refreshing = null;
 async function accessToken(force) {
   const t = store.get('token', null);
   if (!t) return null;
+  // Aanmelding van een andere (oude) Spotify-app: opnieuw laten aanmelden met de huidige app.
+  if (t.client !== CLIENT_ID) { store.del('token'); return null; }
   if (!force && Date.now() < t.expires) return t.access;
   if (!refreshing) {
     refreshing = (async () => {
