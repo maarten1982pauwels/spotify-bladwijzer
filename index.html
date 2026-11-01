@@ -202,7 +202,7 @@ async function tokenRequest(body) {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ client_id: CLIENT_ID, ...body })
   });
-  if (!res.ok) throw new Error('Inloggen mislukt (' + res.status + ')');
+  if (!res.ok) { const e = new Error('Inloggen mislukt (' + res.status + ')'); e.status = res.status; throw e; }
   const t = await res.json();
   const old = store.get('token', {});
   store.set('token', {
@@ -219,25 +219,44 @@ async function handleRedirect() {
   await tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: REDIRECT_URI, code_verifier: store.get('pkce_verifier', '') });
   store.del('pkce_verifier');
 }
-async function accessToken() {
+// Spotify geeft bij elke vernieuwing een nieuwe refresh-token en maakt de oude ongeldig.
+// Daarom mag er maar één vernieuwing tegelijk lopen; anders faalt de tweede en word je uitgelogd.
+let refreshing = null;
+async function accessToken(force) {
   const t = store.get('token', null);
   if (!t) return null;
-  if (Date.now() < t.expires) return t.access;
-  try { await tokenRequest({ grant_type: 'refresh_token', refresh_token: t.refresh }); }
-  catch { store.del('token'); return null; }
-  return store.get('token').access;
+  if (!force && Date.now() < t.expires) return t.access;
+  if (!refreshing) {
+    refreshing = (async () => {
+      try { await tokenRequest({ grant_type: 'refresh_token', refresh_token: t.refresh }); return 'ok'; }
+      catch (e) {
+        const now = store.get('token', null);
+        if (now && now.refresh !== t.refresh) return 'ok';          // een ander venster vernieuwde al
+        if (e.status === 400 || e.status === 401) { store.del('token'); return 'expired'; } // echt ongeldig
+        return 'offline';                                            // netwerkprobleem: blijf aangemeld
+      }
+    })().finally(() => { refreshing = null; });
+  }
+  const result = await refreshing;
+  if (result === 'ok') return store.get('token').access;
+  if (result === 'offline') return t.access;
+  return null;
 }
 function logout() { store.del('token'); me = null; playlists = null; render(); }
 
 // ===== Spotify API =====
-async function api(path, options = {}) {
+async function api(path, options = {}, retried) {
   const token = await accessToken();
   if (!token) { render(); throw new Error('Niet ingelogd'); }
   const res = await fetch(path.startsWith('http') ? path : API + path, {
     ...options, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(options.headers || {}) }
   });
   if (res.status === 204) return null;
-  if (res.status === 401) { store.del('token'); render(); throw new Error('Opnieuw inloggen nodig'); }
+  if (res.status === 401) {
+    // Eerst de toegang vernieuwen en één keer opnieuw proberen, pas daarna opnieuw laten inloggen.
+    if (!retried && await accessToken(true)) return api(path, options, true);
+    render(); throw new Error('Opnieuw inloggen nodig');
+  }
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
   if (!res.ok) { const e = new Error(data?.error?.message || ('Fout ' + res.status)); e.status = res.status; e.reason = data?.error?.reason; throw e; }
@@ -530,6 +549,9 @@ function updateSyncStatus() {
   document.getElementById('syncnow').onclick = () => { toast('Bezig…'); syncAndRefresh().then(() => toast('Klaar')); };
   document.getElementById('syncoff').onclick = () => { sync.disconnect(); updateSyncStatus(); toast('Synchronisatie staat uit op dit toestel'); };
 }
+
+// Vraag de browser om de opgeslagen gegevens (aanmelding, token, bladwijzers) niet op te ruimen.
+try { navigator.storage?.persist?.(); } catch {}
 
 window.addEventListener('hashchange', render);
 document.addEventListener('visibilitychange', () => {
