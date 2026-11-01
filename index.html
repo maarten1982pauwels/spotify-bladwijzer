@@ -408,12 +408,12 @@ async function render() {
 async function renderHome() {
   app.innerHTML = `<header><h1>Playlist Bladwijzer</h1><button class="small" id="settings" aria-label="Instellingen">⚙︎ Instellingen</button></header>
     <div id="syncline"></div>
-    <h2>Nu aan het spelen</h2><div id="now" class="card muted">Laden…</div>
+    <h2>Nu aan het spelen</h2><div id="now" class="card"></div>
     <h2>Je playlists</h2><input type="search" id="filter" placeholder="Zoek een playlist">
     <div id="lists" class="list" style="margin-top:8px"><p class="muted">Laden…</p></div>`;
   document.getElementById('settings').onclick = () => location.hash = 'instellingen';
   updateSyncStatus();
-  renderNowPlaying();
+  showNowButton();
   try {
     const lists = await loadPlaylists();
     const draw = () => {
@@ -435,11 +435,23 @@ async function renderHome() {
   } catch (e) { document.getElementById('lists').innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
 }
 
+// Wat er nu speelt wordt enkel opgehaald als je op de knop tikt.
+function showNowButton(message) {
+  const el = document.getElementById('now');
+  if (!el) return;
+  el.classList.remove('muted');
+  el.innerHTML = `${message ? `<div class="muted">${esc(message)}</div>` : ''}
+    <div class="actions" style="${message ? '' : 'margin-top:0'}"><button class="primary" id="loadnow">${message ? 'Opnieuw' : 'Toon wat er nu speelt'}</button></div>`;
+  document.getElementById('loadnow').onclick = renderNowPlaying;
+}
+
 async function renderNowPlaying() {
   const el = document.getElementById('now');
+  el.classList.add('muted');
+  el.textContent = 'Laden…';
   try {
     const now = await api('/me/player/currently-playing');
-    if (!now || !now.item) { el.textContent = 'Er speelt momenteel niets op Spotify.'; return; }
+    if (!now || !now.item) { showNowButton('Er speelt momenteel niets op Spotify.'); return; }
     const t = now.item;
     const ctx = now.context?.type === 'playlist' ? now.context.uri.split(':').pop() : null;
     const lists = await loadPlaylists();
@@ -450,7 +462,9 @@ async function renderNowPlaying() {
         <div class="grow"><div class="ellipsis"><b>${esc(t.name)}</b></div>
           <div class="muted ellipsis">${esc(simplify(t).artists)}</div>
           <div class="muted ellipsis">${p ? 'Uit playlist: ' + esc(p.name) : 'Niet vanuit een van je playlists'}</div></div></div>
-      ${p ? `<div class="actions"><button class="primary" id="savenow">Bewaar als bladwijzer</button></div>` : ''}`;
+      <div class="actions">${p ? '<button class="primary" id="savenow">Bewaar als bladwijzer</button>' : ''}
+        <button id="refreshnow">Vernieuw</button></div>`;
+    document.getElementById('refreshnow').onclick = renderNowPlaying;
     if (p) document.getElementById('savenow').onclick = async () => {
       let position = null;
       if (canListTracks(p)) { try { position = (await loadTracks(p.id)).findIndex(x => x.uri === t.uri) + 1 || null; } catch {} }
@@ -458,7 +472,7 @@ async function renderNowPlaying() {
       toast(`Bewaard voor „${p.name}”`);
       renderHome();
     };
-  } catch (e) { el.textContent = 'Kon niet ophalen wat er speelt: ' + e.message; }
+  } catch (e) { showNowButton('Kon niet ophalen wat er speelt: ' + e.message); }
 }
 
 async function renderPlaylist(id) {
