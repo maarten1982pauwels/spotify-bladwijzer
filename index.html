@@ -128,17 +128,30 @@ const sync = {
     if (this.busy) return this.busy.then(() => this.run());
     this.busy = (async () => {
       const id = await this.gistId();
-      const g = await this.gh('/gists/' + id);
+      // Vraag de gist enkel volledig op als hij veranderd is (ETag), dat spaart verkeer bij het automatisch controleren.
+      const res = await fetch('https://api.github.com/gists/' + id, { cache: 'no-store', headers: {
+        Authorization: 'Bearer ' + this.token(), Accept: 'application/vnd.github+json',
+        ...(store.get('gist_etag', null) ? { 'If-None-Match': store.get('gist_etag') } : {}) } });
+      if (res.status === 401) throw new Error('GitHub-token ongeldig of verlopen');
       let remote = {};
-      const f = g.files?.[GIST_FILE];
-      if (f) {
-        try { remote = JSON.parse((f.truncated ? await (await fetch(f.raw_url, { cache: 'no-store' })).text() : f.content) || '{}'); } catch {}
+      if (res.status === 304) {
+        remote = store.get('gist_last', {});
+      } else {
+        if (!res.ok) throw new Error('GitHub gaf fout ' + res.status);
+        const g = await res.json();
+        const f = g.files?.[GIST_FILE];
+        if (f) {
+          try { remote = JSON.parse((f.truncated ? await (await fetch(f.raw_url, { cache: 'no-store' })).text() : f.content) || '{}'); } catch {}
+        }
+        store.set('gist_etag', res.headers.get('ETag'));
+        store.set('gist_last', remote);
       }
       const local = bookmarks.raw();
       const merged = this.merge(local, remote);
       store.set('bladwijzers', merged);
       if (JSON.stringify(merged) !== JSON.stringify(remote)) {
         await this.gh('/gists/' + id, { method: 'PATCH', body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(merged, null, 1) } } }) });
+        store.set('gist_last', merged); store.del('gist_etag');
       }
       store.set('last_sync', new Date().toISOString());
       store.del('sync_error');
@@ -149,18 +162,22 @@ const sync = {
   },
   soon() { clearTimeout(this.timer); this.timer = setTimeout(() => this.run().then(updateSyncStatus), 300); },
   async connect(token) {
-    store.set('gh_token', token.trim()); store.del('gist_id');
+    store.set('gh_token', token.trim()); store.del('gist_id'); store.del('gist_etag'); store.del('gist_last');
     await this.run();
     const err = store.get('sync_error', null);
     if (err) { store.del('gh_token'); throw new Error(err); }
   },
-  disconnect() { store.del('gh_token'); store.del('gist_id'); store.del('last_sync'); store.del('sync_error'); }
+  disconnect() { store.del('gh_token'); store.del('gist_id'); store.del('gist_etag'); store.del('gist_last'); store.del('last_sync'); store.del('sync_error'); }
 };
 async function syncAndRefresh() {
   const changed = await sync.run();
   updateSyncStatus();
-  if (changed) render();
+  if (changed && viewRefresh) { try { viewRefresh(); } catch {} }
 }
+// Elk scherm zet hier een functie die enkel de bladwijzers opnieuw tekent (zonder je zoekterm of scrollpositie te verliezen).
+let viewRefresh = null;
+// Zolang de app open staat, controleer elke 15 seconden of er op een ander toestel iets veranderde.
+setInterval(() => { if (!document.hidden && sync.token()) syncAndRefresh(); }, 15000);
 
 // ===== Inloggen met Spotify (PKCE, geen geheim nodig) =====
 function randomString(len) {
@@ -304,6 +321,7 @@ async function render() {
     return;
   }
   const route = location.hash.slice(1);
+  viewRefresh = null;
   if (route.startsWith('playlist/')) return renderPlaylist(route.slice(9));
   if (route === 'instellingen') return renderSettings();
   return renderHome();
@@ -335,6 +353,7 @@ async function renderHome() {
     };
     document.getElementById('filter').oninput = draw;
     draw();
+    viewRefresh = draw;
   } catch (e) { document.getElementById('lists').innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
 }
 
@@ -373,20 +392,27 @@ async function renderPlaylist(id) {
   app.innerHTML = `<header><button class="link" id="back">‹ Terug</button></header>
     <div class="row"><img class="cover big" src="${esc(p.images?.[0]?.url || '')}" alt="">
       <div class="grow"><h1>${esc(p.name)}</h1><div class="muted">${trackCount(p)} nummers</div></div></div>
-    <div class="card" style="margin-top:16px">
+    <div class="card" style="margin-top:16px" id="bm"></div>
+    <h2>Kies het laatste nummer zelf</h2>
+    <input type="search" id="q" placeholder="${canListTracks(p) ? 'Filter de nummers' : 'Zoek een nummer op titel of artiest'}">
+    <div id="tracks" style="margin-top:8px"></div>`;
+  document.getElementById('back').onclick = () => location.hash = '';
+  const drawBookmark = () => {
+    const b = bookmarks.get(id);
+    document.getElementById('bm').innerHTML = `
       <div class="muted">Laatst gebleven bij</div>
       <div>${bookmarkLine(b)}</div>
       ${b ? `<div class="muted">Bewaard op ${fmtDate(b.savedAt)}</div>` : ''}
       <div class="actions">
         <button class="primary" id="resume">${b ? 'Hervat vanaf dit nummer' : 'Speel playlist af'}</button>
         ${b ? '<button id="clear">Wis bladwijzer</button>' : ''}
-      </div></div>
-    <h2>Kies het laatste nummer zelf</h2>
-    <input type="search" id="q" placeholder="${canListTracks(p) ? 'Filter de nummers' : 'Zoek een nummer op titel of artiest'}">
-    <div id="tracks" style="margin-top:8px"></div>`;
-  document.getElementById('back').onclick = () => location.hash = '';
-  document.getElementById('resume').onclick = () => resume(p);
-  if (b) document.getElementById('clear').onclick = () => { bookmarks.remove(id); renderPlaylist(id); };
+      </div>`;
+    document.getElementById('resume').onclick = () => resume(p);
+    if (b) document.getElementById('clear').onclick = () => { bookmarks.remove(id); drawBookmark(); redrawTracks?.(); };
+  };
+  drawBookmark();
+  let redrawTracks = null;
+  viewRefresh = () => { drawBookmark(); redrawTracks?.(); };
 
   const tracksEl = document.getElementById('tracks');
   const q = document.getElementById('q');
@@ -396,6 +422,7 @@ async function renderPlaylist(id) {
     renderPlaylist(id); window.scrollTo(0, 0);
   };
   const drawTracks = (tracks, numbered) => {
+    redrawTracks = () => drawTracks(tracks, numbered);
     const saved = bookmarks.get(id)?.uri;
     tracksEl.innerHTML = tracks.map(({ t, n }) => `
       <div class="track ${t.uri === saved ? 'saved' : ''}" data-uri="${esc(t.uri)}">
