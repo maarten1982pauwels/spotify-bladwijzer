@@ -74,12 +74,93 @@ const store = {
   set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} },
   del(key) { try { localStorage.removeItem(key); } catch {} }
 };
+// Een gewiste bladwijzer blijft als { deleted: true } bewaard, zodat het wissen ook naar je andere toestel gaat.
 const bookmarks = {
-  all() { return store.get('bladwijzers', {}); },
+  raw() { return store.get('bladwijzers', {}); },
+  all() { return Object.fromEntries(Object.entries(this.raw()).filter(([, b]) => !b.deleted)); },
   get(playlistId) { return this.all()[playlistId]; },
-  save(playlistId, data) { const all = this.all(); all[playlistId] = { ...data, savedAt: new Date().toISOString() }; store.set('bladwijzers', all); },
-  remove(playlistId) { const all = this.all(); delete all[playlistId]; store.set('bladwijzers', all); }
+  put(playlistId, value) { const raw = this.raw(); raw[playlistId] = { ...value, savedAt: new Date().toISOString() }; store.set('bladwijzers', raw); sync.soon(); },
+  save(playlistId, data) { this.put(playlistId, data); },
+  remove(playlistId) { this.put(playlistId, { deleted: true }); }
 };
+
+// ===== Synchronisatie via een geheime GitHub-gist =====
+const GIST_FILE = 'bladwijzers.json';
+const sync = {
+  busy: null, timer: null,
+  token() { return store.get('gh_token', ''); },
+  async gh(path, options = {}) {
+    const res = await fetch('https://api.github.com' + path, {
+      ...options, cache: 'no-store',
+      headers: { Authorization: 'Bearer ' + this.token(), Accept: 'application/vnd.github+json',
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}) }
+    });
+    if (res.status === 401) throw new Error('GitHub-token ongeldig of verlopen');
+    if (!res.ok) throw new Error('GitHub gaf fout ' + res.status);
+    return res.json();
+  },
+  async gistId() {
+    let id = store.get('gist_id', null);
+    if (id) return id;
+    for (let page = 1; page <= 10 && !id; page++) {
+      const list = await this.gh('/gists?per_page=100&page=' + page);
+      id = list.find(g => g.files && g.files[GIST_FILE])?.id;
+      if (list.length < 100) break;
+    }
+    if (!id) {
+      const g = await this.gh('/gists', { method: 'POST', body: JSON.stringify({
+        description: 'Playlist Bladwijzer: gesynchroniseerde bladwijzers', public: false,
+        files: { [GIST_FILE]: { content: '{}' } } }) });
+      id = g.id;
+    }
+    store.set('gist_id', id);
+    return id;
+  },
+  merge(a, b) {
+    const out = { ...a };
+    for (const [k, v] of Object.entries(b)) if (!out[k] || (v.savedAt || '') > (out[k].savedAt || '')) out[k] = v;
+    return out;
+  },
+  // Haalt de bladwijzers van GitHub op, voegt ze samen met de lokale (nieuwste wint) en schrijft het resultaat terug.
+  // Geeft true terug als er lokaal iets veranderde.
+  run() {
+    if (!this.token()) return Promise.resolve(false);
+    if (this.busy) return this.busy.then(() => this.run());
+    this.busy = (async () => {
+      const id = await this.gistId();
+      const g = await this.gh('/gists/' + id);
+      let remote = {};
+      const f = g.files?.[GIST_FILE];
+      if (f) {
+        try { remote = JSON.parse((f.truncated ? await (await fetch(f.raw_url, { cache: 'no-store' })).text() : f.content) || '{}'); } catch {}
+      }
+      const local = bookmarks.raw();
+      const merged = this.merge(local, remote);
+      store.set('bladwijzers', merged);
+      if (JSON.stringify(merged) !== JSON.stringify(remote)) {
+        await this.gh('/gists/' + id, { method: 'PATCH', body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(merged, null, 1) } } }) });
+      }
+      store.set('last_sync', new Date().toISOString());
+      store.del('sync_error');
+      return JSON.stringify(merged) !== JSON.stringify(local);
+    })().catch(e => { store.set('sync_error', e.message); return false; })
+      .finally(() => { this.busy = null; });
+    return this.busy;
+  },
+  soon() { clearTimeout(this.timer); this.timer = setTimeout(() => this.run().then(updateSyncStatus), 300); },
+  async connect(token) {
+    store.set('gh_token', token.trim()); store.del('gist_id');
+    await this.run();
+    const err = store.get('sync_error', null);
+    if (err) { store.del('gh_token'); throw new Error(err); }
+  },
+  disconnect() { store.del('gh_token'); store.del('gist_id'); store.del('last_sync'); store.del('sync_error'); }
+};
+async function syncAndRefresh() {
+  const changed = await sync.run();
+  updateSyncStatus();
+  if (changed) render();
+}
 
 // ===== Inloggen met Spotify (PKCE, geen geheim nodig) =====
 function randomString(len) {
@@ -231,8 +312,10 @@ async function renderHome() {
   app.innerHTML = `<header><h1>Playlist Bladwijzer</h1><button class="link" id="logout">Uitloggen</button></header>
     <h2>Nu aan het spelen</h2><div id="now" class="card muted">Laden…</div>
     <h2>Je playlists</h2><input type="search" id="filter" placeholder="Zoek een playlist">
-    <div id="lists" class="list" style="margin-top:8px"><p class="muted">Laden…</p></div>`;
+    <div id="lists" class="list" style="margin-top:8px"><p class="muted">Laden…</p></div>
+    <h2>Synchronisatie tussen Mac en iPhone</h2><div id="sync" class="card"></div>`;
   document.getElementById('logout').onclick = logout;
+  updateSyncStatus();
   renderNowPlaying();
   try {
     const lists = await loadPlaylists();
@@ -347,9 +430,38 @@ async function renderPlaylist(id) {
   }
 }
 
+function updateSyncStatus() {
+  const el = document.getElementById('sync');
+  if (!el) return;
+  if (!sync.token()) {
+    el.innerHTML = `<div class="muted">Plak hier je GitHub-token om je bladwijzers op al je toestellen gelijk te houden.</div>
+      <div class="actions"><input type="password" id="ghtoken" placeholder="github_pat_…" autocomplete="off"
+        style="flex:1;min-width:0;font:inherit;padding:10px 14px;border-radius:999px;border:1px solid var(--card2);background:var(--bg);color:var(--text)">
+      <button class="primary" id="ghconnect">Koppel</button></div>`;
+    document.getElementById('ghconnect').onclick = async () => {
+      const v = document.getElementById('ghtoken').value;
+      if (!v.trim()) return;
+      try { await sync.connect(v); toast('Synchronisatie staat aan'); render(); }
+      catch (e) { toast('Koppelen mislukt: ' + e.message); }
+    };
+    return;
+  }
+  const err = store.get('sync_error', null), last = store.get('last_sync', null);
+  el.innerHTML = `<div class="${err ? '' : 'muted'}" style="${err ? 'color:var(--danger)' : ''}">
+      ${err ? 'Synchroniseren mislukt: ' + esc(err) : last ? 'Gesynchroniseerd op ' + fmtDate(last) : 'Nog niet gesynchroniseerd'}</div>
+    <div class="actions"><button class="small" id="syncnow">Nu synchroniseren</button>
+      <button class="small" id="syncoff">Ontkoppel</button></div>`;
+  document.getElementById('syncnow').onclick = () => { toast('Bezig…'); syncAndRefresh(); };
+  document.getElementById('syncoff').onclick = () => { sync.disconnect(); updateSyncStatus(); };
+}
+
 window.addEventListener('hashchange', render);
-document.addEventListener('visibilitychange', () => { if (!document.hidden && !location.hash) render(); });
-handleRedirect().catch(e => toast(e.message)).finally(render);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  if (!location.hash) render();
+  syncAndRefresh();
+});
+handleRedirect().catch(e => toast(e.message)).finally(() => { render(); syncAndRefresh(); });
 </script>
 </body>
 </html>
