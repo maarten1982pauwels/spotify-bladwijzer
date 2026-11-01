@@ -284,9 +284,9 @@ async function api(path, options = {}, retried) {
   }
   if (res.status === 429) {
     // Te veel vragen in korte tijd: Spotify zegt hoeveel seconden we moeten wachten.
-    // Kan de browser de wachttijd niet lezen, dan wachten we telkens langer: 1, 2, 4 … tot 60 minuten.
+    // Kan de browser de wachttijd niet lezen, dan wachten we telkens langer: 30 s, 1, 2, 4 … tot 10 minuten.
     const header = Number(res.headers.get('Retry-After'));
-    const backoff = Math.min((Number(raw.get('rl_backoff')) || 30) * 2, 3600);
+    const backoff = Math.min((Number(raw.get('rl_backoff')) || 15) * 2, 600);
     const wait = header > 0 ? header : backoff;
     if (!(header > 0)) raw.set('rl_backoff', String(backoff));
     rateLimitedUntil = Date.now() + wait * 1000;
