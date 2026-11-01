@@ -615,13 +615,48 @@ function renderSettings() {
     <h1>Instellingen</h1>
     <h2>Spotify</h2>
     <div class="card"><div class="row" id="account"><div class="grow muted">Account laden…</div></div>
-      <div class="actions"><button class="small" id="logout">Uitloggen</button></div></div>
+      <div class="actions"><button class="small" id="logout">Uitloggen</button>
+        <button class="small" id="conntest">Test verbinding</button></div>
+      <div id="conntestresult" class="muted" style="margin-top:8px"></div></div>
     <h2>Synchronisatie tussen Mac en iPhone</h2>
     <div id="sync" class="card"></div>`;
   document.getElementById('back').onclick = () => location.hash = '';
   document.getElementById('logout').onclick = () => { location.hash = ''; logout(); };
+  document.getElementById('conntest').onclick = testConnection;
   updateSyncStatus();
   renderAccount();
+  if (Date.now() < rateLimitedUntil) document.getElementById('conntestresult').textContent = rateLimitError().message;
+}
+
+// Doet precies één vraag aan Spotify, ook tijdens een wachttijd, en toont het eerlijke antwoord.
+async function testConnection() {
+  const out = document.getElementById('conntestresult');
+  out.style.color = '';
+  out.textContent = 'Bezig met testen…';
+  const token = await accessToken();
+  if (!token) { out.textContent = 'Niet ingelogd bij Spotify.'; return; }
+  let res;
+  try { res = await fetch(API + '/me', { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' }); }
+  catch (e) { out.textContent = 'Geen verbinding met Spotify (netwerkfout): ' + e.message; return; }
+  let msg = '';
+  try { msg = (await res.json())?.error?.message || ''; } catch {}
+  if (res.ok) {
+    rateLimitedUntil = 0; raw.del('rl_until'); raw.del('rl_backoff');
+    out.style.color = 'var(--accent)';
+    out.textContent = `✓ Spotify antwoordt normaal (code ${res.status}). Er is geen blokkade meer; de wachttijd is gewist.`;
+    playlistsFromCache = true;
+    return;
+  }
+  out.style.color = 'var(--danger)';
+  if (res.status === 429) {
+    const ra = res.headers.get('Retry-After');
+    out.textContent = `Spotify blokkeert de app nog (code 429${msg ? ': ' + msg : ''}). ` +
+      (ra ? `Volgens Spotify nog ${ra >= 120 ? Math.ceil(ra / 60) + ' minuten' : ra + ' seconden'}.` : 'Spotify zegt niet hoe lang nog.');
+  } else if (res.status === 403) {
+    out.textContent = `Spotify weigert de toegang (code 403${msg ? ': ' + msg : ''}). Dit is geen blokkade door te veel vragen.`;
+  } else {
+    out.textContent = `Spotify gaf een andere fout (code ${res.status}${msg ? ': ' + msg : ''}).`;
+  }
 }
 
 async function renderAccount() {
