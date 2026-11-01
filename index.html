@@ -69,11 +69,27 @@ const SCOPES = [
 const API = 'https://api.spotify.com/v1';
 
 // ===== Opslag (later uit te breiden met synchronisatie) =====
-const store = {
-  get(key, fallback) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; } },
-  set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} },
+// Bladwijzers en sync-gegevens worden per Spotify-account bewaard, zodat meerdere mensen hetzelfde toestel kunnen gebruiken.
+const PER_USER = ['bladwijzers', 'gh_token', 'gist_id', 'gist_etag', 'gist_last', 'last_sync', 'sync_error'];
+const raw = {
+  get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+  set(key, v) { try { localStorage.setItem(key, v); } catch {} },
   del(key) { try { localStorage.removeItem(key); } catch {} }
 };
+const fullKey = key => PER_USER.includes(key) ? key + ':' + (raw.get('spotify_user') || '_') : key;
+const store = {
+  get(key, fallback) { try { const v = raw.get(fullKey(key)); return v ? JSON.parse(v) : fallback; } catch { return fallback; } },
+  set(key, value) { raw.set(fullKey(key), JSON.stringify(value)); },
+  del(key) { raw.del(fullKey(key)); }
+};
+function setUser(id) {
+  raw.set('spotify_user', id);
+  // Gegevens van vóór deze versie (zonder account erbij) gaan naar het eerste account dat zich aanmeldt.
+  for (const k of PER_USER) {
+    const old = raw.get(k);
+    if (old !== null) { if (raw.get(k + ':' + id) === null) raw.set(k + ':' + id, old); raw.del(k); }
+  }
+}
 // Een gewiste bladwijzer blijft als { deleted: true } bewaard, zodat het wissen ook naar je andere toestel gaat.
 const bookmarks = {
   raw() { return store.get('bladwijzers', {}); },
@@ -124,7 +140,7 @@ const sync = {
   // Haalt de bladwijzers van GitHub op, voegt ze samen met de lokale (nieuwste wint) en schrijft het resultaat terug.
   // Geeft true terug als er lokaal iets veranderde.
   run() {
-    if (!this.token()) return Promise.resolve(false);
+    if (!raw.get('spotify_user') || !this.token()) return Promise.resolve(false);
     if (this.busy) return this.busy.then(() => this.run());
     this.busy = (async () => {
       const id = await this.gistId();
@@ -242,7 +258,7 @@ async function accessToken(force) {
   if (result === 'offline') return t.access;
   return null;
 }
-function logout() { store.del('token'); me = null; playlists = null; render(); }
+function logout() { store.del('token'); raw.del('spotify_user'); me = null; playlists = null; render(); }
 
 // ===== Spotify API =====
 async function api(path, options = {}, retried) {
@@ -270,7 +286,7 @@ async function allPages(path) {
 let me = null, playlists = null;
 async function loadPlaylists(force) {
   if (playlists && !force) return playlists;
-  me = me || await api('/me');
+  await ensureUser();
   playlists = (await allPages('/me/playlists?limit=50')).filter(Boolean);
   return playlists;
 }
@@ -329,8 +345,30 @@ function bookmarkLine(b) {
   return `<span class="bookmark">▶ ${b.position ? '#' + b.position + ' · ' : ''}${esc(b.name)}</span> <span class="muted">· ${esc(b.artists)}</span>`;
 }
 
+// Haalt het Spotify-account op en onthoudt het. Geeft false terug als het account (nog) niet is toegelaten.
+async function ensureUser() {
+  if (me && raw.get('spotify_user') === me.id) return true;
+  try {
+    me = await api('/me');
+    if (raw.get('spotify_user') !== me.id) { playlists = null; setUser(me.id); }
+    return true;
+  } catch (e) {
+    if (e.status === 403) return false;
+    throw e;
+  }
+}
+
 async function render() {
   const token = await accessToken();
+  if (token && !(await ensureUser().catch(() => true))) {
+    app.innerHTML = `<div class="center">
+      <h1>Nog geen toegang</h1>
+      <p class="muted">Je Spotify-account is nog niet toegelaten tot deze app.<br>
+        Vraag degene die de app met je deelde om je toe te voegen. Geef daarvoor je naam en het e-mailadres van je Spotify-account door.</p>
+      <button id="logout2">Ander account gebruiken</button></div>`;
+    document.getElementById('logout2').onclick = logout;
+    return;
+  }
   if (!token) {
     app.innerHTML = `<div class="center">
       <h1>Playlist Bladwijzer</h1>
@@ -494,7 +532,7 @@ function renderSettings() {
 async function renderAccount() {
   const el = document.getElementById('account');
   try {
-    me = me || await api('/me');
+    await ensureUser();
     const pic = me.images?.at(-1)?.url || me.images?.[0]?.url || '';
     const name = me.display_name || me.id;
     el.innerHTML = `${pic ? `<img class="cover" style="border-radius:50%" src="${esc(pic)}" alt="">`
