@@ -61,7 +61,7 @@
 <script>
 // ===== Instellingen =====
 // Bij elke aanpassing verhogen, zodat je in Instellingen ziet of je de nieuwste versie hebt.
-const APP_VERSION = '1.0 · 1 nov 2026, 14:57';
+const APP_VERSION = '1.1 · 1 nov 2026, 15:00';
 const CLIENT_ID = '9424577e9fef406fb126cfcfeaa47105';
 const REDIRECT_URI = location.origin + location.pathname;
 const SCOPES = [
@@ -282,7 +282,10 @@ async function api(path, options = {}, retried) {
 }
 async function allPages(path) {
   let url = path, items = [];
-  while (url) { const page = await api(url); items.push(...page.items); url = page.next; }
+  while (url) {
+    const page = await api(url); items.push(...page.items); url = page.next;
+    if (url) await new Promise(r => setTimeout(r, 400));  // rustig aan: niet alle pagina's tegelijk vragen
+  }
   return items;
 }
 let me = null, playlists = null;
@@ -570,33 +573,26 @@ function renderSettings() {
   renderAccount();
 }
 
-// Doet precies één vraag aan Spotify en toont het eerlijke antwoord.
+// Test twee dingen bij Spotify (je account en je playlistlijst) en toont per test het eerlijke antwoord.
 async function testConnection() {
   const out = document.getElementById('conntestresult');
-  out.style.color = '';
   out.textContent = 'Bezig met testen…';
   const token = await accessToken();
   if (!token) { out.textContent = 'Niet ingelogd bij Spotify.'; return; }
-  let res;
-  try { res = await fetch(API + '/me', { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' }); }
-  catch (e) { out.textContent = 'Geen verbinding met Spotify (netwerkfout): ' + e.message; return; }
-  let msg = '';
-  try { msg = (await res.json())?.error?.message || ''; } catch {}
-  if (res.ok) {
-    out.style.color = 'var(--accent)';
-    out.textContent = `✓ Spotify antwoordt normaal (code ${res.status}).`;
-    return;
-  }
-  out.style.color = 'var(--danger)';
-  if (res.status === 429) {
+  const tests = [['Account', '/me'], ['Playlists', '/me/playlists?limit=1']];
+  const lines = [];
+  for (const [label, path] of tests) {
+    let res;
+    try { res = await fetch(API + path, { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' }); }
+    catch (e) { lines.push({ ok: false, text: `${label}: geen verbinding (netwerkfout)` }); continue; }
+    let msg = '', total = null;
+    try { const d = await res.json(); msg = d?.error?.message || ''; total = d?.total ?? null; } catch {}
+    if (res.ok) { lines.push({ ok: true, text: `${label}: OK (code ${res.status})${total !== null ? ` · ${total} playlists` : ''}` }); continue; }
     const ra = res.headers.get('Retry-After');
-    out.textContent = `Spotify blokkeert de app nog (code 429${msg ? ': ' + msg : ''}). ` +
-      (ra ? `Volgens Spotify nog ${ra >= 120 ? Math.ceil(ra / 60) + ' minuten' : ra + ' seconden'}.` : 'Spotify zegt niet hoe lang nog.');
-  } else if (res.status === 403) {
-    out.textContent = `Spotify weigert de toegang (code 403${msg ? ': ' + msg : ''}). Dit is geen blokkade door te veel vragen.`;
-  } else {
-    out.textContent = `Spotify gaf een andere fout (code ${res.status}${msg ? ': ' + msg : ''}).`;
+    lines.push({ ok: false, text: `${label}: code ${res.status}${msg ? ' (' + msg + ')' : ''}` +
+      (res.status === 429 ? (ra ? ` · nog ${ra >= 120 ? Math.ceil(ra / 60) + ' minuten' : ra + ' seconden'} wachten` : ' · Spotify zegt niet hoe lang') : '') });
   }
+  out.innerHTML = lines.map(l => `<div style="color:${l.ok ? 'var(--accent)' : 'var(--danger)'}">${l.ok ? '✓' : '✗'} ${esc(l.text)}</div>`).join('');
 }
 
 async function renderAccount() {
