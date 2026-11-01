@@ -434,11 +434,11 @@ async function renderPlaylist(id) {
 function renderSettings() {
   app.innerHTML = `<header><button class="link" id="back">‹ Terug</button></header>
     <h1>Instellingen</h1>
-    <h2>Synchronisatie tussen Mac en iPhone</h2>
-    <div id="sync" class="card"></div>
     <h2>Spotify</h2>
     <div class="card"><div class="row" id="account"><div class="grow muted">Account laden…</div></div>
-      <div class="actions"><button class="small" id="logout">Uitloggen</button></div></div>`;
+      <div class="actions"><button class="small" id="logout">Uitloggen</button></div></div>
+    <h2>Synchronisatie tussen Mac en iPhone</h2>
+    <div id="sync" class="card"></div>`;
   document.getElementById('back').onclick = () => location.hash = '';
   document.getElementById('logout').onclick = () => { location.hash = ''; logout(); };
   updateSyncStatus();
