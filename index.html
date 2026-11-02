@@ -61,7 +61,7 @@
 <script>
 // ===== Instellingen =====
 // Bij elke aanpassing verhogen, zodat je in Instellingen ziet of je de nieuwste versie hebt.
-const APP_VERSION = '1.3 · 1 nov 2026, 17:54';
+const APP_VERSION = '1.4 · 2 nov 2026, 02:21';
 const CLIENT_ID = '38794784e4964f45ad7912762eb8a82e';
 const REDIRECT_URI = location.origin + location.pathname;
 const SCOPES = [
@@ -285,10 +285,7 @@ async function api(path, options = {}, retried) {
 }
 async function allPages(path) {
   let url = path, items = [];
-  while (url) {
-    const page = await api(url); items.push(...page.items); url = page.next;
-    if (url) await new Promise(r => setTimeout(r, 400));  // rustig aan: niet alle pagina's tegelijk vragen
-  }
+  while (url) { const page = await api(url); items.push(...page.items); url = page.next; }
   return items;
 }
 let me = null, playlists = null;
