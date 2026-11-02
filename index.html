@@ -61,7 +61,7 @@
 <script>
 // ===== Instellingen =====
 // Bij elke aanpassing verhogen, zodat je in Instellingen ziet of je de nieuwste versie hebt.
-const APP_VERSION = '1.4 · 2 nov 2026, 02:21';
+const APP_VERSION = '1.5 · 2 nov 2026, 02:24';
 const CLIENT_ID = '38794784e4964f45ad7912762eb8a82e';
 const REDIRECT_URI = location.origin + location.pathname;
 const SCOPES = [
@@ -660,6 +660,8 @@ try { navigator.storage?.persist?.(); } catch {}
 window.addEventListener('hashchange', render);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
+  // Bij het terug openen van de app: playlists altijd opnieuw ophalen bij Spotify.
+  playlists = null;
   if (!location.hash) render();
   syncAndRefresh();
 });
